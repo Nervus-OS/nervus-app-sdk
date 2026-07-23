@@ -1,6 +1,11 @@
 plugins {
     alias(libs.plugins.kotlin.jvm)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.compose)
 }
+
+group = "com.nervus.sdk"
+version = "0.1.0"
 
 kotlin {
     jvmToolchain(21)
@@ -51,6 +56,10 @@ tasks.named("compileJava") {
     dependsOn(cloneProtocol)
 }
 
+tasks.named("compileTestKotlin") {
+    dependsOn(cloneProtocol)
+}
+
 tasks.named("processResources") {
     dependsOn(cloneProtocol)
 }
@@ -63,9 +72,15 @@ dependencies {
     implementation(libs.protobuf.java)
     implementation(libs.protobuf.kotlin)
     implementation(libs.kotlinx.coroutines.core)
+    implementation("org.jetbrains.kotlin:kotlin-reflect:${libs.versions.kotlin.get()}")
+
+    implementation(compose.desktop.currentOs)
+    implementation(compose.material3)
 
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation("org.jetbrains.kotlin:kotlin-test")
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(compose.desktop.currentOs)
 }
 
 tasks.test {
