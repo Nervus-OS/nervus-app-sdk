@@ -2,7 +2,6 @@ package com.nervus.sdk.ipc
 
 import com.nervus.sdk.ipc.connection.FrameReader
 import com.nervus.sdk.ipc.connection.FrameWriter
-import com.nervus.sdk.ipc.dispatch.DispatchHandler
 import com.nervus.sdk.ipc.rpc.PendingMap
 import com.nervus.sdk.ipc.rpc.RequestIdGenerator
 import io.github.nervusos.ipc.v1.*

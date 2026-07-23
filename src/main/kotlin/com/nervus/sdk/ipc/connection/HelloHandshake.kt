@@ -20,7 +20,8 @@ class HelloHandshake(
         maxMinor: Int,
         sdkName: String,
         sdkVersion: String,
-        componentId: String = ""
+        componentId: String = "",
+        timeoutMs: Long = 5000
     ): HandshakeResult {
         val hello = Hello.newBuilder()
             .setMinProtocolMajor(minMajor)
@@ -33,7 +34,7 @@ class HelloHandshake(
 
         frameWriter.writeFrame(Envelope.newBuilder().setHello(hello).build())
 
-        val response = frameReader.readFrame()
+        val response = frameReader.readFrame(timeoutMs)
 
         if (response.bodyCase != Envelope.BodyCase.HELLO_ACK) {
             throw ProtocolViolationException(

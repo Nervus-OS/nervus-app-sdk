@@ -7,11 +7,19 @@ import kotlinx.coroutines.flow.asSharedFlow
 
 class SubscriptionManager {
     private val subscriptions = HashMap<Long, MutableSharedFlow<Event>>()
+    private val pendingBindings = HashMap<Long, Long>()
 
     fun subscribe(subscriptionId: Long): Flow<Event> {
         return subscriptions.getOrPut(subscriptionId) {
             MutableSharedFlow(replay = 0, extraBufferCapacity = 64)
         }.asSharedFlow()
+    }
+
+    fun bind(requestId: Long, serverSubscriptionId: Long) {
+        pendingBindings[requestId] = serverSubscriptionId
+        subscriptions.getOrPut(serverSubscriptionId) {
+            MutableSharedFlow(replay = 0, extraBufferCapacity = 64)
+        }
     }
 
     fun pushEvent(event: Event): Boolean {
@@ -23,8 +31,13 @@ class SubscriptionManager {
         return subscriptions.remove(subscriptionId)
     }
 
+    fun closeSubscription(subscriptionId: Long) {
+        subscriptions.remove(subscriptionId)
+    }
+
     fun clear() {
         subscriptions.clear()
+        pendingBindings.clear()
     }
 
     fun subscriptionCount(): Int = subscriptions.size

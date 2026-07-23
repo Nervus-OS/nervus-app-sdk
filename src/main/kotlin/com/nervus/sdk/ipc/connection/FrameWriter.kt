@@ -5,6 +5,8 @@ import java.io.OutputStream
 import java.nio.ByteBuffer
 
 class FrameWriter(private val output: OutputStream) {
+    private val lock = Any()
+
     fun writeFrame(envelope: Envelope) {
         val body = envelope.toByteArray()
         val length = body.size
@@ -19,8 +21,10 @@ class FrameWriter(private val output: OutputStream) {
         header.putInt(length)
         header.flip()
 
-        output.write(header.array())
-        output.write(body)
-        output.flush()
+        synchronized(lock) {
+            output.write(header.array())
+            output.write(body)
+            output.flush()
+        }
     }
 }

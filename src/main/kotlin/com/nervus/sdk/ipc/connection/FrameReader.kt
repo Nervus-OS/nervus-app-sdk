@@ -11,9 +11,9 @@ class ProtocolViolationException(message: String) : Exception(message)
 class FrameReader(private val input: InputStream) {
     private val headerBuf = ByteBuffer.allocate(HEADER_SIZE)
 
-    fun readFrame(): Envelope {
+    fun readFrame(timeoutMs: Long = 0): Envelope {
         headerBuf.clear()
-        readFully(input, headerBuf)
+        readFully(headerBuf, timeoutMs)
         headerBuf.flip()
         val length = headerBuf.getInt().toLong() and 0xFFFFFFFFL
 
@@ -26,18 +26,22 @@ class FrameReader(private val input: InputStream) {
             )
         }
 
-        val body = ByteArray(length.toInt())
-        readFully(input, ByteBuffer.wrap(body))
+        val bodyBuf = ByteBuffer.allocate(length.toInt())
+        readFully(bodyBuf, timeoutMs)
         return try {
-            Envelope.parseFrom(body)
+            Envelope.parseFrom(bodyBuf.array())
         } catch (e: InvalidProtocolBufferException) {
             throw ProtocolViolationException("malformed envelope: ${e.message}")
         }
     }
 
-    private fun readFully(stream: InputStream, buf: ByteBuffer) {
+    private fun readFully(buf: ByteBuffer, timeoutMs: Long = 0) {
+        val deadline = if (timeoutMs > 0) System.nanoTime() + timeoutMs * 1_000_000L else 0L
         while (buf.hasRemaining()) {
-            val n = stream.read(buf.array(), buf.position(), buf.remaining())
+            if (deadline > 0 && System.nanoTime() >= deadline) {
+                throw java.net.SocketTimeoutException("read timed out after ${timeoutMs}ms")
+            }
+            val n = input.read(buf.array(), buf.position(), buf.remaining())
             if (n == -1) {
                 throw EOFException("connection closed unexpectedly")
             }
