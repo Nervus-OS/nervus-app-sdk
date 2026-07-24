@@ -11,9 +11,10 @@ import io.github.nervusos.ipc.v1.Success
 import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.Continuation
-import kotlin.coroutines.EmptyCoroutineContext
+import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.runBlocking
 
 internal data class MethodRegistration(
@@ -35,7 +36,7 @@ internal class ServiceStub {
         val methods = instance::class.java.methods
         val seenIds = HashSet<Int>()
         for (method in methods) {
-            val annotation = method.getAnnotation(Method::class.java) ?: continue
+            val annotation = resolveMethodAnnotation(method) ?: continue
             val methodId = annotation.id
             val allParamTypes = method.parameterTypes
 
@@ -62,27 +63,33 @@ internal class ServiceStub {
                 invoke = { payload ->
                     val resolvedArgs = resolveArguments(payload, appParamTypes)
                     try {
-                        if (isSuspend) {
+                        val result = if (isSuspend) {
                             runBlocking {
-                                val continuation = object : Continuation<Any?> {
-                                    override val context = EmptyCoroutineContext
-                                    override fun resumeWith(result: Result<Any?>) {
-                                        if (result.isFailure) {
-                                            throw result.exceptionOrNull()!!
+                                suspendCoroutine { cont ->
+                                    try {
+                                        val r = method.invoke(instance, *resolvedArgs, cont)
+                                        if (r !== COROUTINE_SUSPENDED) {
+                                            cont.resume(r)
                                         }
+                                    } catch (e: InvocationTargetException) {
+                                        cont.resumeWithException(e.cause ?: e)
+                                    } catch (e: Exception) {
+                                        cont.resumeWithException(e)
                                     }
                                 }
-                                method.invoke(instance, *resolvedArgs, continuation)
                             }
                         } else {
                             method.invoke(instance, *resolvedArgs)
-                        }.let { serializeResult(it) }
+                        }
+                        serializeResult(result)
                     } catch (e: InvocationTargetException) {
                         throw e.cause ?: e
                     }
                 }
             )
             registrations[methodId] = registration
+            java.util.logging.Logger.getLogger(ServiceStub::class.java.name)
+                .info("registered method id=$methodId name=${method.name} suspend=$isSuspend class=${instance::class.java.name}")
 
             handler.register(methodId, MethodHandler { payload, context ->
                 if (dispatchCallback != null) {
@@ -93,6 +100,40 @@ internal class ServiceStub {
                 }
             })
         }
+        if (registrations.isEmpty()) {
+            java.util.logging.Logger.getLogger(ServiceStub::class.java.name)
+                .warning("no @Method found on ${instance::class.java.name} (checked interfaces too)")
+        }
+    }
+
+    /** @Method may live on the interface; Kotlin does not copy it onto the impl method. */
+    private fun resolveMethodAnnotation(method: java.lang.reflect.Method): Method? {
+        method.getAnnotation(Method::class.java)?.let { return it }
+        val paramTypes = method.parameterTypes
+        for (iface in method.declaringClass.interfaces) {
+            try {
+                val m = iface.getMethod(method.name, *paramTypes)
+                m.getAnnotation(Method::class.java)?.let { return it }
+            } catch (_: NoSuchMethodException) {
+            }
+        }
+        var superCls = method.declaringClass.superclass
+        while (superCls != null && superCls != Any::class.java) {
+            try {
+                val m = superCls.getMethod(method.name, *paramTypes)
+                m.getAnnotation(Method::class.java)?.let { return it }
+            } catch (_: NoSuchMethodException) {
+            }
+            for (iface in superCls.interfaces) {
+                try {
+                    val m = iface.getMethod(method.name, *paramTypes)
+                    m.getAnnotation(Method::class.java)?.let { return it }
+                } catch (_: NoSuchMethodException) {
+                }
+            }
+            superCls = superCls.superclass
+        }
+        return null
     }
 
     private fun invokeDirect(methodId: Int, payload: ByteArray, routeId: Long): DispatchResult {

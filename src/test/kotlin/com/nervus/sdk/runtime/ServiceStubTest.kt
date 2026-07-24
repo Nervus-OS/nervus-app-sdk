@@ -144,6 +144,9 @@ class ServiceStubTest {
 
         @MethodAnnotation(id = 3)
         fun add(a: Int, b: Int): Int = a + b
+
+        @MethodAnnotation(id = 4)
+        suspend fun greetSuspend(name: String): String = "Hello, $name!"
     }
 
     @Test
@@ -173,6 +176,40 @@ class ServiceStubTest {
         assertTrue(result.hasSuccess())
         val responseStr = result.success.payload.toStringUtf8()
         assertEquals("Hello, world!", responseStr)
+    }
+
+    @Test
+    fun `dispatch suspend String method returns serialized result`() {
+        val stub = ServiceStub()
+        val handler = DispatchHandler()
+        stub.registerInterface(TestService(), handler)
+        val strBytes = "world".toByteArray()
+        val payload = intToBytes(strBytes.size) + strBytes
+        val result = stub.dispatch(4, payload, CallerContext.getDefaultInstance())
+        assertNotNull(result)
+        assertTrue(result.hasSuccess(), "failure=${result?.failure?.publicMessage}")
+        assertEquals("Hello, world!", result.success.payload.toStringUtf8())
+    }
+
+    interface AnnotatedGreeter {
+        @MethodAnnotation(id = 10)
+        suspend fun greet(name: String): String
+    }
+
+    @Test
+    fun `registerInterface finds @Method on interface when impl has none`() {
+        val stub = ServiceStub()
+        val handler = DispatchHandler()
+        val impl = object : AnnotatedGreeter {
+            override suspend fun greet(name: String): String = "Hello, $name!"
+        }
+        stub.registerInterface(impl, handler)
+        val strBytes = "World".toByteArray()
+        val payload = intToBytes(strBytes.size) + strBytes
+        val result = stub.dispatch(10, payload, CallerContext.getDefaultInstance())
+        assertNotNull(result)
+        assertTrue(result.hasSuccess(), "failure=${result?.failure?.publicMessage}")
+        assertEquals("Hello, World!", result.success.payload.toStringUtf8())
     }
 
     @Test

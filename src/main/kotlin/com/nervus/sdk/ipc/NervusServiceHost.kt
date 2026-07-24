@@ -79,9 +79,6 @@ internal class NervusServiceHost(
             isConnected = true
 
             val idleTimeout = result.limits.idleTimeoutMs
-            if (idleTimeout > 0) {
-                socket.socketChannel.socket().soTimeout = idleTimeout
-            }
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             readerJob = scope?.launch {
                 runReaderLoop()

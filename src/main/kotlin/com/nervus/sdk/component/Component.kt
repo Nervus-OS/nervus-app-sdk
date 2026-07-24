@@ -2,6 +2,7 @@ package com.nervus.sdk.component
 
 import com.nervus.sdk.ipc.ConnectionState
 import kotlinx.coroutines.*
+import java.util.concurrent.CountDownLatch
 import java.util.logging.Logger
 
 data class ComponentConfig(
@@ -25,6 +26,7 @@ abstract class Component(
     @Volatile
     private var _closed = false
 
+    private val closeLatch = CountDownLatch(1)
     private var scope: CoroutineScope? = null
     private var reconnectJob: Job? = null
     private var reconnectAttempts = 0
@@ -55,11 +57,13 @@ abstract class Component(
         onConnect()
         startReconnectMonitor()
         onReady()
+        closeLatch.await()
     }
 
     override fun close() {
         if (_closed) return
         _closed = true
+        closeLatch.countDown()
         state = ConnectionState.CLOSED
         onStop()
         reconnectJob?.cancel()
