@@ -23,7 +23,7 @@ enum class ConnectionState {
     CLOSED
 }
 
-class NervusClient(
+internal open class NervusClient(
     val sdkName: String = "nervus-app-sdk",
     val sdkVersion: String = "0.1.0",
     val minProtocolMajor: Int = 1,
@@ -124,7 +124,7 @@ class NervusClient(
     }
 
     private fun closeConnection() {
-        connectionState = ConnectionState.CLOSED
+        connectionState = ConnectionState.DISCONNECTED
         udSocket?.close()
         readerJob?.cancel()
         pingJob?.cancel()

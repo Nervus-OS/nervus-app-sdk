@@ -7,7 +7,7 @@ import java.net.UnixDomainSocketAddress
 import java.nio.channels.Channels
 import java.nio.channels.SocketChannel
 
-class UnixDomainSocket(
+internal class UnixDomainSocket(
     val socketChannel: SocketChannel,
     val inputStream: InputStream,
     val outputStream: OutputStream,

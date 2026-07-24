@@ -11,14 +11,14 @@ import java.util.logging.Logger
 import com.nervus.sdk.ipc.rpc.PendingMap
 import com.nervus.sdk.ipc.rpc.RequestIdGenerator
 
-data class Registration(
+internal data class Registration(
     val endpointId: Long,
     val interfaceId: String,
     val interfaceMajor: Int,
     val interfaceMinor: Int
 )
 
-class NervusServiceHost(
+internal class NervusServiceHost(
     val sdkName: String = "nervus-app-sdk",
     val sdkVersion: String = "0.1.0",
     val minProtocolMajor: Int = 1,

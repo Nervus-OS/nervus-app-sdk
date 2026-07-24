@@ -2,7 +2,7 @@ package com.nervus.sdk.ipc.connection
 
 import io.github.nervusos.ipc.v1.*
 
-data class HandshakeResult(
+internal data class HandshakeResult(
     val protocolMajor: Int,
     val protocolMinor: Int,
     val limits: ConnectionLimits,
@@ -10,7 +10,7 @@ data class HandshakeResult(
     val componentId: String
 )
 
-class HelloHandshake(
+internal class HelloHandshake(
     private val frameReader: FrameReader,
     private val frameWriter: FrameWriter
 ) {
@@ -75,7 +75,7 @@ class HelloHandshake(
     }
 }
 
-class HandshakeRejectedException(
+internal class HandshakeRejectedException(
     val statusCode: StatusCode,
     val detail: String
 ) : Exception("handshake rejected: $statusCode $detail")

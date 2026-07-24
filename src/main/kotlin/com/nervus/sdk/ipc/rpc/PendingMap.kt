@@ -7,7 +7,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-class PendingMap {
+internal class PendingMap {
     private val map = ConcurrentHashMap<Long, CompletableFuture<Response>>()
     private val payloadBytes = ConcurrentHashMap<Long, Int>()
     @Volatile

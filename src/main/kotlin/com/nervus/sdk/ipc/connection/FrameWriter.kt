@@ -4,7 +4,7 @@ import io.github.nervusos.ipc.v1.Envelope
 import java.io.OutputStream
 import java.nio.ByteBuffer
 
-class FrameWriter(private val output: OutputStream) {
+internal class FrameWriter(private val output: OutputStream) {
     companion object {
         const val HEADER_SIZE = 4
         const val MAX_FRAME_BYTES = 128 * 1024

@@ -6,9 +6,9 @@ import java.io.EOFException
 import java.io.InputStream
 import java.nio.ByteBuffer
 
-class ProtocolViolationException(message: String) : Exception(message)
+internal class ProtocolViolationException(message: String) : Exception(message)
 
-class FrameReader(private val input: InputStream) {
+internal class FrameReader(private val input: InputStream) {
     private val headerBuf = ByteBuffer.allocate(HEADER_SIZE)
 
     fun readFrame(timeoutMs: Long = 0): Envelope {

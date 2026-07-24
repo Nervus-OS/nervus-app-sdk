@@ -2,7 +2,7 @@ package com.nervus.sdk.ipc.dispatch
 
 import io.github.nervusos.ipc.v1.*
 
-data class DispatchContext(
+internal data class DispatchContext(
     val routeId: Long,
     val remainingMs: Int,
     val caller: CallerContext
@@ -12,11 +12,11 @@ data class DispatchContext(
     internal var cancelledRouteIds: Set<Long> = emptySet()
 }
 
-fun interface MethodHandler {
+internal fun interface MethodHandler {
     fun handle(payload: ByteArray, context: DispatchContext): DispatchResult
 }
 
-class DispatchHandler {
+internal class DispatchHandler {
     private val handlers = HashMap<Int, MethodHandler>()
     private val cancelledRoutes = HashSet<Long>()
 

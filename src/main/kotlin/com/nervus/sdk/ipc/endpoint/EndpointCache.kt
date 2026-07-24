@@ -2,7 +2,7 @@ package com.nervus.sdk.ipc.endpoint
 
 import java.util.LinkedHashMap
 
-data class EndpointCacheKey(
+internal data class EndpointCacheKey(
     val interfaceId: String,
     val interfaceMajor: Int,
     val interfaceMinor: Int,
@@ -26,7 +26,7 @@ data class EndpointCacheKey(
     }
 }
 
-data class EndpointCacheValue(
+internal data class EndpointCacheValue(
     val endpointId: Long,
     val interfaceMajor: Int = 0,
     val interfaceMinor: Int = 0,
@@ -35,7 +35,7 @@ data class EndpointCacheValue(
     val resolvedAtMs: Long = System.currentTimeMillis()
 )
 
-class EndpointCache(private val maxEntries: Int = 64) {
+internal class EndpointCache(private val maxEntries: Int = 64) {
     private val cache = object : LinkedHashMap<EndpointCacheKey, EndpointCacheValue>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<EndpointCacheKey, EndpointCacheValue>?): Boolean {
             return size > maxEntries

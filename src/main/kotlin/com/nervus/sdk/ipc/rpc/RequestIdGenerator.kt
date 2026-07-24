@@ -2,7 +2,7 @@ package com.nervus.sdk.ipc.rpc
 
 import java.util.concurrent.atomic.AtomicLong
 
-class RequestIdGenerator {
+internal class RequestIdGenerator {
     private val counter = AtomicLong(INITIAL_ID)
 
     fun next(): Long {

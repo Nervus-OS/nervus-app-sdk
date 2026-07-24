@@ -8,7 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import java.util.logging.Logger
 
-class SubscriptionManager {
+internal class SubscriptionManager {
     private val subscriptions = HashMap<Long, Channel<Event>>()
     private val deliveryClasses = HashMap<Long, DeliveryClass>()
     private val pendingBindings = HashMap<Long, Long>()
