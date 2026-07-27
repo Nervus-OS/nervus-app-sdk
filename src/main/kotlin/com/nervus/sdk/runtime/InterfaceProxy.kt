@@ -4,8 +4,10 @@ import com.nervus.sdk.annotations.Method
 import com.nervus.sdk.ipc.NervusClient
 import io.github.nervusos.ipc.v1.Response
 import io.github.nervusos.ipc.v1.StatusCode
+import java.lang.reflect.ParameterizedType
 import java.lang.reflect.Proxy
-import java.util.concurrent.CompletableFuture
+import java.lang.reflect.Type
+import java.lang.reflect.WildcardType
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 
@@ -47,7 +49,7 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
 
             val future = client.call(endpoint.endpointId, methodId, payload)
             val returnType = if (isSuspend) {
-                method.genericReturnType
+                suspendReturnType(method)
             } else {
                 method.returnType
             }
@@ -58,7 +60,7 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
                 val resultFuture = future.thenApply { response -> convertReturnType(response, returnType) }
                 resultFuture.whenComplete { result, ex ->
                     if (ex != null) {
-                        continuation.resumeWith(Result.failure(ex))
+                        continuation.resumeWith(Result.failure(ex.cause ?: ex))
                     } else {
                         continuation.resumeWith(Result.success(result))
                     }
@@ -70,19 +72,39 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
         } as T
     }
 
-    private fun convertReturnType(response: Response, returnType: java.lang.reflect.Type): Any? {
+    private fun suspendReturnType(method: java.lang.reflect.Method): Class<*> {
+        val last = method.genericParameterTypes.lastOrNull() ?: return method.returnType
+        if (last is ParameterizedType) {
+            val arg = last.actualTypeArguments.firstOrNull() ?: return method.returnType
+            return typeToClass(arg)
+        }
+        return method.returnType
+    }
+
+    private fun typeToClass(type: Type): Class<*> = when (type) {
+        is Class<*> -> type
+        is ParameterizedType -> typeToClass(type.rawType)
+        is WildcardType -> {
+            val bound = type.lowerBounds.firstOrNull() ?: type.upperBounds.firstOrNull()
+            if (bound != null) typeToClass(bound) else Any::class.java
+        }
+        else -> Any::class.java
+    }
+
+    private fun convertReturnType(response: Response, returnType: Type): Any? {
         val raw = extractPayload(response)
+        val cls = typeToClass(returnType)
         return when {
-            returnType == Void.TYPE || returnType == java.lang.Void::class.java -> null
-            returnType == ByteArray::class.java -> raw
-            returnType == String::class.java -> raw.toString(Charsets.UTF_8)
-            returnType == Int::class.java || returnType == Int::class.javaPrimitiveType -> {
+            cls == Void.TYPE || cls == java.lang.Void::class.java -> null
+            cls == ByteArray::class.java -> raw
+            cls == String::class.java -> raw.toString(Charsets.UTF_8)
+            cls == Int::class.java || cls == Int::class.javaPrimitiveType || cls == java.lang.Integer::class.java -> {
                 if (raw.size >= 4) ((raw[0].toInt() and 0xFF) shl 24) or
                     ((raw[1].toInt() and 0xFF) shl 16) or
                     ((raw[2].toInt() and 0xFF) shl 8) or
                     (raw[3].toInt() and 0xFF) else 0
             }
-            returnType == Long::class.java || returnType == Long::class.javaPrimitiveType -> {
+            cls == Long::class.java || cls == Long::class.javaPrimitiveType || cls == java.lang.Long::class.java -> {
                 if (raw.size >= 8) ((raw[0].toLong() and 0xFF) shl 56) or
                     ((raw[1].toLong() and 0xFF) shl 48) or
                     ((raw[2].toLong() and 0xFF) shl 40) or
@@ -92,7 +114,7 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
                     ((raw[6].toLong() and 0xFF) shl 8) or
                     (raw[7].toLong() and 0xFF) else 0L
             }
-            returnType == Float::class.java || returnType == Float::class.javaPrimitiveType -> {
+            cls == Float::class.java || cls == Float::class.javaPrimitiveType || cls == java.lang.Float::class.java -> {
                 if (raw.size >= 4) Float.fromBits(
                     ((raw[0].toInt() and 0xFF) shl 24) or
                     ((raw[1].toInt() and 0xFF) shl 16) or
@@ -100,7 +122,7 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
                     (raw[3].toInt() and 0xFF)
                 ) else 0f
             }
-            returnType == Double::class.java || returnType == Double::class.javaPrimitiveType -> {
+            cls == Double::class.java || cls == Double::class.javaPrimitiveType || cls == java.lang.Double::class.java -> {
                 if (raw.size >= 8) Double.fromBits(
                     ((raw[0].toLong() and 0xFF) shl 56) or
                     ((raw[1].toLong() and 0xFF) shl 48) or
@@ -112,11 +134,11 @@ internal class InterfaceProxy(private val client: NervusClient, private val endp
                     (raw[7].toLong() and 0xFF)
                 ) else 0.0
             }
-            returnType == Boolean::class.java || returnType == Boolean::class.javaPrimitiveType -> {
+            cls == Boolean::class.java || cls == Boolean::class.javaPrimitiveType || cls == java.lang.Boolean::class.java -> {
                 raw.isNotEmpty() && raw[0] != 0.toByte()
             }
-            com.google.protobuf.Message::class.java.isAssignableFrom(returnType as Class<*>) -> {
-                val parseMethod = returnType.getMethod("parseFrom", ByteArray::class.java)
+            com.google.protobuf.Message::class.java.isAssignableFrom(cls) -> {
+                val parseMethod = cls.getMethod("parseFrom", ByteArray::class.java)
                 parseMethod.invoke(null, raw)
             }
             else -> raw
