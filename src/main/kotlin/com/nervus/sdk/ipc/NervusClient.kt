@@ -1,6 +1,7 @@
 package com.nervus.sdk.ipc
 
 import com.nervus.sdk.ipc.connection.*
+import com.nervus.sdk.ipc.dispatch.DispatchHandler
 import com.nervus.sdk.ipc.endpoint.EndpointCache
 import com.nervus.sdk.ipc.endpoint.EndpointCacheKey
 import com.nervus.sdk.ipc.endpoint.EndpointCacheValue
@@ -41,6 +42,21 @@ internal open class NervusClient(
     private val requestIdGenerator = RequestIdGenerator()
     private val pendingMap = PendingMap()
     private val resolvePending = PendingMap()
+
+    // ---- 提供侧（RegisterEndpoint / Dispatch）--------------------------------
+    //
+    // 为什么消费侧的 Client 也要能注册 endpoint：内核【没有】"启动某个 app"的
+    // IPC——EnsureStarted 只能被 endpoint.Resolve 在拉起 on-demand 组件时触发。
+    // 于是任何"能被启动"的 app 都必须导出一个接口并注册它，否则谁也叫不醒它。
+    //
+    // 也就是说"纯消费者"这个角色在 Nervus 上不存在：一个有界面、要能被点开的
+    // app 天然同时是提供者。把注册能力放在这里，而不是逼调用方再开一条连接，
+    // 是因为 endpoint_id 是【连接作用域】的，两条连接意味着两套句柄和两次
+    // 组件核对，出问题时很难对上号。
+    private val registerPending = PendingMap()
+    private val launchPending = PendingMap()
+    private val dispatchHandler = DispatchHandler()
+    private val registrations = ConcurrentHashMap<String, Long>()
     private val resolveEndpointIds = ConcurrentHashMap<Long, String>()
     private val endpointSubscriptions = ConcurrentHashMap<Long, MutableSet<Long>>()
     private val _endpointCache = EndpointCache()
@@ -134,6 +150,13 @@ internal open class NervusClient(
         resolveEndpointIds.clear()
         _endpointCache.invalidateAll()
         _subscriptionManager.clear()
+        // 提供侧状态同样要清：连接断了，注册在这条连接上的 endpoint_id 全部失效
+        // （endpoint_id 是连接作用域的），重连后必须重新 RegisterEndpoint。
+        // 不清的话重连后会拿着旧句柄去回 DispatchResult，被内核当迟到结果丢弃
+        registerPending.failAll()
+        launchPending.failAll()
+        dispatchHandler.clear()
+        registrations.clear()
     }
 
     private suspend fun runReaderLoop() {
@@ -169,6 +192,18 @@ internal open class NervusClient(
                     }
                     Envelope.BodyCase.SUBSCRIPTION_CLOSED -> {
                         handleSubscriptionClosed(envelope.subscriptionClosed)
+                    }
+                    Envelope.BodyCase.REGISTER_ENDPOINT_RESULT -> {
+                        handleRegisterEndpointResult(envelope.registerEndpointResult)
+                    }
+                    Envelope.BodyCase.LAUNCH_COMPONENT_RESULT -> {
+                        handleLaunchComponentResult(envelope.launchComponentResult)
+                    }
+                    Envelope.BodyCase.DISPATCH -> {
+                        handleDispatch(envelope.dispatch)
+                    }
+                    Envelope.BodyCase.CANCEL_DISPATCH -> {
+                        dispatchHandler.cancelDispatch(envelope.cancelDispatch.routeId)
                     }
                     Envelope.BodyCase.PING -> {
                         handlePing(envelope.ping)
@@ -346,6 +381,164 @@ internal open class NervusClient(
         frameWriter?.writeFrame(
             Envelope.newBuilder().setPong(pong).build()
         )
+    }
+
+    /** 提供侧的 dispatch 分发器。ServiceStub 往它上面挂 method handler */
+    val handler: DispatchHandler get() = dispatchHandler
+
+    /**
+     * 向 nervud 报到一个本组件实现的 Interface。
+     *
+     * 只能注册 manifest 的 `components[].exports` 里已声明的接口，且要有对应权限
+     * （`visibility: public` 需 perm.service.register，`package` 需
+     * perm.service.register.private）——内核 endpoint/register.go 的七步准入。
+     *
+     * 返回服务端侧的 endpoint_id。它与调用方 Resolve 得到的 endpoint_id 是
+     * **两个命名空间**：同一个数字在两条连接上毫无关系。
+     */
+    fun registerEndpoint(
+        interfaceId: String,
+        interfaceMajor: Int = 1,
+        interfaceMinor: Int = 0,
+        schemaHash: ByteArray = ByteArray(0),
+        resourceHandle: String = "",
+        timeoutMs: Int = 5000
+    ): CompletableFuture<Long> {
+        val writer = frameWriter ?: throw IllegalStateException("not connected")
+        val requestId = requestIdGenerator.next()
+        val future = registerPending.register(requestId)
+
+        try {
+            writer.writeFrame(
+                Envelope.newBuilder().setRegisterEndpoint(
+                    RegisterEndpoint.newBuilder()
+                        .setRequestId(requestId)
+                        .setInterfaceId(interfaceId)
+                        .setInterfaceMajor(interfaceMajor)
+                        .setInterfaceMinor(interfaceMinor)
+                        .setInterfaceSchemaHash(com.google.protobuf.ByteString.copyFrom(schemaHash))
+                        .setResourceHandle(resourceHandle)
+                        .build()
+                ).build()
+            )
+            if (timeoutMs > 0) {
+                future.orTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            }
+        } catch (e: Exception) {
+            registerPending.failOne(requestId, StatusCode.STATUS_CODE_UNAVAILABLE, "write failed: ${e.message}")
+        }
+
+        return future.thenApply { response ->
+            if (response.hasFailure()) {
+                throw RuntimeException("register endpoint '$interfaceId' rejected: ${response.failure.publicMessage}")
+            }
+            val endpointId = RegisterEndpointSuccess.parseFrom(response.success.payload).endpointId
+            registrations[interfaceId] = endpointId
+            endpointId
+        }
+    }
+
+    private fun handleRegisterEndpointResult(result: RegisterEndpointResult) {
+        val response = when (result.outcomeCase) {
+            RegisterEndpointResult.OutcomeCase.SUCCESS ->
+                Response.newBuilder().setSuccess(
+                    Success.newBuilder()
+                        .setCode(StatusCode.STATUS_CODE_OK)
+                        .setPayload(result.success.toByteString())
+                        .build()
+                ).build()
+            RegisterEndpointResult.OutcomeCase.FAILURE ->
+                Response.newBuilder().setFailure(result.failure).build()
+            else ->
+                Response.newBuilder().setFailure(
+                    Failure.newBuilder()
+                        .setCode(StatusCode.STATUS_CODE_INTERNAL)
+                        .setPublicMessage("register_endpoint_result with no outcome")
+                        .build()
+                ).build()
+        }
+        registerPending.complete(result.requestId, response)
+    }
+
+    /**
+     * 请求 nervud 拉起一个已安装的组件（Envelope 的 LaunchComponent，body 80）。
+     *
+     * 需要 `perm.system.launch`（MinTrust=Platform）——只有随系统镜像发布、
+     * 平台签名的包拿得到。Launcher 与会话服务是它的使用者。
+     *
+     * 成功【只】意味着那个组件现在在跑，不建立任何调用关系。想和它通信仍要走
+     * [resolveEndpoint]，该有的权限与可见性裁决一条不少。
+     *
+     * @return true 表示该组件在本次请求之前就已经在运行
+     */
+    fun launchComponent(
+        packageId: String,
+        componentId: String,
+        timeoutMs: Int = 30_000,
+    ): CompletableFuture<Boolean> {
+        val writer = frameWriter ?: throw IllegalStateException("not connected")
+        val requestId = requestIdGenerator.next()
+        val future = launchPending.register(requestId)
+
+        try {
+            writer.writeFrame(
+                Envelope.newBuilder().setLaunchComponent(
+                    LaunchComponent.newBuilder()
+                        .setRequestId(requestId)
+                        .setPackageId(packageId)
+                        .setComponentId(componentId)
+                        .build()
+                ).build()
+            )
+            if (timeoutMs > 0) {
+                future.orTimeout(timeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            }
+        } catch (e: Exception) {
+            launchPending.failOne(requestId, StatusCode.STATUS_CODE_UNAVAILABLE, "write failed: ${e.message}")
+        }
+
+        return future.thenApply { response ->
+            if (response.hasFailure()) {
+                throw RuntimeException(
+                    "launch $packageId/$componentId rejected: ${response.failure.publicMessage} " +
+                        "(code=${response.failure.code})"
+                )
+            }
+            LaunchComponentSuccess.parseFrom(response.success.payload).alreadyRunning
+        }
+    }
+
+    private fun handleLaunchComponentResult(result: LaunchComponentResult) {
+        val response = when (result.outcomeCase) {
+            LaunchComponentResult.OutcomeCase.SUCCESS ->
+                Response.newBuilder().setSuccess(
+                    Success.newBuilder()
+                        .setCode(StatusCode.STATUS_CODE_OK)
+                        .setPayload(result.success.toByteString())
+                        .build()
+                ).build()
+            LaunchComponentResult.OutcomeCase.FAILURE ->
+                Response.newBuilder().setFailure(result.failure).build()
+            else ->
+                Response.newBuilder().setFailure(
+                    Failure.newBuilder()
+                        .setCode(StatusCode.STATUS_CODE_INTERNAL)
+                        .setPublicMessage("launch_component_result with no outcome")
+                        .build()
+                ).build()
+        }
+        launchPending.complete(result.requestId, response)
+    }
+
+    private fun handleDispatch(dispatch: Dispatch) {
+        val dispatchResult = dispatchHandler.dispatch(dispatch)
+        try {
+            frameWriter?.writeFrame(
+                Envelope.newBuilder().setDispatchResult(dispatchResult).build()
+            )
+        } catch (e: Exception) {
+            logger.severe("failed to write dispatch result: ${e.message}")
+        }
     }
 
     fun resolveEndpoint(

@@ -12,7 +12,15 @@ data class ProvidedInterface(
     val id: String,
     val major: Int,
     val minor: Int = 0,
-    val instance: Any,
+    /**
+     * 接口的实现实例。方法由 [com.nervus.sdk.annotations.Method] 注解标出。
+     *
+     * 允许为 null：**存在没有任何方法的接口**。内核没有"启动 app"的 IPC，
+     * 于是"能被点开的 app"必须导出一个接口好让别人 Resolve 它来触发启动——
+     * 那个接口的唯一作用就是有个名字，一个方法都不需要。给它硬造一个空实现
+     * 只是为了满足类型，反而让读代码的人以为它有行为。
+     */
+    val instance: Any? = null,
     val resourceHandle: String = "",
     val schemaHash: ByteArray = ByteArray(0),
 )
@@ -88,11 +96,15 @@ abstract class NervusService(
             }
             logger.info("registered interface '${iface.id}' -> endpoint ${registration.endpointId}")
 
-            val stub = ServiceStub()
-            stub.registerInterface(iface.instance, h.handler) { methodId, payload, caller ->
-                dispatch(methodId, payload, caller)
+            // 无方法的占位接口（instance == null）只占一个可被 Resolve 的名字，
+            // 没有 handler 要挂
+            iface.instance?.let { impl ->
+                val stub = ServiceStub()
+                stub.registerInterface(impl, h.handler) { methodId, payload, caller ->
+                    dispatch(methodId, payload, caller)
+                }
+                stubs.add(stub)
             }
-            stubs.add(stub)
             endpointRegistrations.add(
                 EndpointRegistration(
                     endpointId = registration.endpointId,

@@ -26,12 +26,22 @@ if (ipcRepoPath == null) {
 val cloneDir = rootProject.projectDir.resolve(".nervus-ipc-clone")
 
 val cloneProtocol by tasks.registering(Copy::class) {
-    description = "Copy nervus-ipc repository for protocol types"
-    from(ipcRepoPath)
-    into(cloneDir)
-    onlyIf { !cloneDir.isDirectory }
+    description = "Copy nervus-ipc protocol sources for compilation"
+    // 只拷生成的协议源码，不再拷整个仓库：整仓拷贝会把 .git、build/、
+    // python 产物一并搬进来（几百 MB），而编译只需要 jvm/protocol/src/main
+    from(ipcRepoPath!!.resolve("jvm/protocol/src/main"))
+    into(cloneDir.resolve("jvm/protocol/src/main"))
+
+    // 【不要加 onlyIf { !cloneDir.isDirectory }】。
+    //
+    // 那样写会让副本在首次构建后【永不更新】：nervus-ipc 里新增的消息在这边
+    // 永远看不见，症状是「proto 明明加了、Kotlin 就是 Unresolved reference」，
+    // 而且删掉 build/ 重来也没用（副本不在 build/ 下）。已经真实踩过一次 ——
+    // LaunchComponent 加进 ipc 之后 SDK 编译不过，就是它。
+    //
+    // Copy 任务本身有增量支持：输入没变时 Gradle 自动跳过，不需要手写 onlyIf。
     doLast {
-        logger.lifecycle("nervus-ipc protocol types synced to $cloneDir")
+        logger.lifecycle("nervus-ipc protocol sources synced to $cloneDir")
     }
 }
 
