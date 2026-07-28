@@ -13,7 +13,6 @@ import io.github.nervusos.ipc.v1.DispatchResult
 import io.github.nervusos.ipc.v1.Event
 import io.github.nervusos.ipc.v1.Failure
 import io.github.nervusos.ipc.v1.ResolveEndpointSuccess
-import io.github.nervusos.ipc.v1.Response
 import io.github.nervusos.ipc.v1.StatusCode
 import kotlinx.coroutines.flow.Flow
 import java.util.concurrent.CompletableFuture
@@ -36,6 +35,7 @@ abstract class NervusApp(
 
     private var client: NervusClient? = null
     private val resolvedEndpoints = ConcurrentHashMap<String, ResolvedEndpoint>()
+    private val endpointResolutionLock = Any()
     private val proxyCache = ConcurrentHashMap<Class<*>, Any>()
     private val stubs = mutableListOf<ServiceStub>()
 
@@ -196,39 +196,64 @@ abstract class NervusApp(
 
     private fun resolveRequiredInterfaces(c: NervusClient) {
         for (req in requiredInterfaces) {
-            val future = c.resolveEndpoint(
-                interfaceId = req.id,
-                minInterfaceMajor = req.minMajor,
-                maxInterfaceMajor = req.maxMajor,
-                resourceType = req.resourceType,
-                resourceRole = req.resourceRole,
-            )
-            val response: Response
             try {
-                response = future.get(30, TimeUnit.SECONDS)
+                resolveDeclaredEndpoint(req.id) { resolveInterface(c, it) }
             } catch (e: Exception) {
                 if (req.isRequired) {
                     throw RuntimeException("failed to resolve required interface '${req.id}': ${e.message}", e)
                 }
                 logger.warning("failed to resolve optional interface '${req.id}': ${e.message}")
-                continue
             }
-            if (response.hasFailure()) {
-                if (req.isRequired) {
-                    throw RuntimeException("failed to resolve required interface '${req.id}': ${response.failure.publicMessage}")
-                }
-                logger.warning("failed to resolve optional interface '${req.id}': ${response.failure.publicMessage}")
-                continue
-            }
-            val success = ResolveEndpointSuccess.parseFrom(response.success.payload)
-            val endpoint = ResolvedEndpoint(
-                endpointId = success.endpointId,
+        }
+    }
+
+    private fun resolveInterface(c: NervusClient, req: InterfaceRequirement): ResolvedEndpoint {
+        val response = try {
+            c.resolveEndpoint(
                 interfaceId = req.id,
-                interfaceMajor = success.interfaceMajor,
-                interfaceMinor = success.interfaceMinor,
+                minInterfaceMajor = req.minMajor,
+                maxInterfaceMajor = req.maxMajor,
+                resourceType = req.resourceType,
+                resourceRole = req.resourceRole,
+            ).get(30, TimeUnit.SECONDS)
+        } catch (e: Exception) {
+            throw RuntimeException("resolve request failed: ${e.message}", e)
+        }
+        if (response.hasFailure()) {
+            throw RuntimeException(
+                "${response.failure.publicMessage} (code=${response.failure.code})"
             )
-            resolvedEndpoints[req.id] = endpoint
+        }
+        val success = ResolveEndpointSuccess.parseFrom(response.success.payload)
+        return ResolvedEndpoint(
+            endpointId = success.endpointId,
+            interfaceId = req.id,
+            interfaceMajor = success.interfaceMajor,
+            interfaceMinor = success.interfaceMinor,
+        ).also { endpoint ->
             logger.info("resolved interface '${req.id}' -> endpoint ${endpoint.endpointId}")
+        }
+    }
+
+    /**
+     * Returns a cached endpoint or resolves a declared interface on demand.
+     *
+     * An optional interface may be unavailable while components start in parallel. A failed
+     * attempt is deliberately not cached, so the next call can resolve it after its provider
+     * has registered.
+     */
+    internal fun resolveDeclaredEndpoint(
+        interfaceId: String,
+        resolver: (InterfaceRequirement) -> ResolvedEndpoint,
+    ): ResolvedEndpoint {
+        resolvedEndpoints[interfaceId]?.let { return it }
+        val requirement = requiredInterfaces.firstOrNull { it.id == interfaceId }
+            ?: throw IllegalStateException(
+                "interface '$interfaceId' is not declared in requiredInterfaces"
+            )
+        synchronized(endpointResolutionLock) {
+            resolvedEndpoints[interfaceId]?.let { return it }
+            return resolver(requirement).also { resolvedEndpoints[interfaceId] = it }
         }
     }
 
@@ -245,7 +270,8 @@ abstract class NervusApp(
      * 对于 payload 就是 protobuf 消息的接口（系统接口都是），显式写
      * `XxxResult.parseFrom(call(...))` 既准确又看得懂，比让反射去猜强。
      *
-     * @param interfaceId 必须已在 [requiredInterfaces] 中解析过
+     * @param interfaceId 必须在 [requiredInterfaces] 中声明；若启动时可选解析失败，
+     * 此处会重新解析
      * @param methodId 接口 schema 里的稳定数字方法 ID
      */
     protected fun call(
@@ -255,10 +281,7 @@ abstract class NervusApp(
         timeoutSeconds: Long = 30,
     ): ByteArray {
         val c = client ?: throw IllegalStateException("component not started")
-        val endpoint = resolvedEndpoints[interfaceId]
-            ?: throw IllegalStateException(
-                "interface '$interfaceId' not resolved; declare it in requiredInterfaces"
-            )
+        val endpoint = resolveDeclaredEndpoint(interfaceId) { resolveInterface(c, it) }
         val response = c.call(endpoint.endpointId, methodId, payload)
             .get(timeoutSeconds, TimeUnit.SECONDS)
         if (response.hasFailure()) {
@@ -286,11 +309,16 @@ abstract class NervusApp(
 
     private fun <T : Any> findEndpointForInterface(interfaceClass: KClass<T>): ResolvedEndpoint {
         val interfaceId = resolveInterfaceId(interfaceClass)
-        return resolvedEndpoints[interfaceId]
-            ?: throw IllegalStateException(
-                "interface '${interfaceClass.qualifiedName}' was not resolved. " +
-                "Make sure to declare it in requiredInterfaces with a matching 'id' field."
+        val c = client ?: throw IllegalStateException("component not started")
+        return try {
+            resolveDeclaredEndpoint(interfaceId) { resolveInterface(c, it) }
+        } catch (e: IllegalStateException) {
+            throw IllegalStateException(
+                "interface '${interfaceClass.qualifiedName}' is not declared in " +
+                    "requiredInterfaces with a matching 'id' field.",
+                e,
             )
+        }
     }
 
     private fun resolveInterfaceId(interfaceClass: KClass<*>): String {
