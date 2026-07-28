@@ -3,6 +3,11 @@ package com.nervus.sdk.component
 import com.nervus.sdk.ipc.ConnectionState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.*
 
@@ -67,6 +72,39 @@ class ComponentTest {
     }
 
     @Test
+    fun `awaitTermination blocks until close`() {
+        val comp = TestComponent()
+        comp.start()
+
+        val waiterStarted = CountDownLatch(1)
+        val waiterReturned = CountDownLatch(1)
+        val waiter = thread(
+            start = true,
+            isDaemon = true,
+            name = "component-termination-waiter",
+        ) {
+            waiterStarted.countDown()
+            comp.awaitTermination()
+            waiterReturned.countDown()
+        }
+
+        comp.use {_ ->
+            assertTrue(waiterStarted.await(1, TimeUnit.SECONDS))
+            assertFalse(
+                waiterReturned.await(100, TimeUnit.MILLISECONDS),
+                "awaitTermination should block before close",
+            )
+        }
+
+        assertTrue(
+            waiterReturned.await(1, TimeUnit.SECONDS),
+            "awaitTermination should return after close",
+        )
+        waiter.join(1_000)
+        assertFalse(waiter.isAlive)
+    }
+
+    @Test
     fun `close during start prevents CONNECTED state`() {
         val comp = object : TestComponent() {
             override fun doStart() {
@@ -91,44 +129,67 @@ class ComponentTest {
 
     @Test
     fun `reconnect attempts are bounded by maxReconnectAttempts`() = runBlocking {
-        var failCount = 0
+        val callCount = AtomicInteger()
+        val retriesAttempted = CountDownLatch(2)
         val comp = object : TestComponent(
-            ComponentConfig(autoReconnect = true, maxReconnectAttempts = 3)
+            ComponentConfig(autoReconnect = true, maxReconnectAttempts = 2)
         ) {
             override fun isActive(): Boolean = false
             override fun doStart() {
-                failCount++
-                if (failCount > 1) {
-                    // only reconnect loop calls doStart
+                val attempt = callCount.incrementAndGet()
+                if (attempt > 1) {
+                    retriesAttempted.countDown()
+                    throw RuntimeException("connection failed #$attempt")
                 }
-                throw RuntimeException("connection failed #$failCount")
             }
         }
-        runCatching { comp.start() }
-        delay(4000)
-        assertTrue(failCount > 0, "doStart should be called at least once")
-        assertTrue(failCount <= 4, "doStart should not exceed maxReconnectAttempts + initial")
-        comp.close()
+        comp.start()
+
+        try {
+            assertTrue(
+                retriesAttempted.await(7, TimeUnit.SECONDS),
+                "reconnect loop should retry doStart up to maxReconnectAttempts",
+            )
+            withTimeout(1_000) {
+                while (comp.state != ConnectionState.DISCONNECTED) {
+                    delay(10)
+                }
+            }
+            delay(1_500)
+            assertEquals(
+                3,
+                callCount.get(),
+                "one initial start plus maxReconnectAttempts=2 retries expected",
+            )
+            assertEquals(ConnectionState.DISCONNECTED, comp.state)
+        } finally {
+            comp.close()
+        }
     }
 
     @Test
     fun `close stops reconnection`() = runBlocking {
-        var callCount = 0
+        val callCount = AtomicInteger()
         val comp = object : TestComponent(
             ComponentConfig(autoReconnect = true, maxReconnectAttempts = 10)
         ) {
             override fun isActive(): Boolean = false
             override fun doStart() {
-                callCount++
-                throw RuntimeException("failed")
+                callCount.incrementAndGet()
             }
         }
-        runCatching { comp.start() }
-        delay(100)
-        val countBeforeClose = callCount
+
+        comp.start()
+        withTimeout(2_500) {
+            while (comp.state != ConnectionState.DISCONNECTED) {
+                delay(10)
+            }
+        }
         comp.close()
-        delay(2000)
-        assertEquals(countBeforeClose, callCount, "doStart should not be called after close")
+        delay(1_200)
+
+        assertEquals(1, callCount.get(), "doStart should not be called after close")
+        assertEquals(ConnectionState.CLOSED, comp.state)
     }
 
     @Test

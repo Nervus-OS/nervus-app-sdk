@@ -57,6 +57,17 @@ abstract class Component(
         onConnect()
         startReconnectMonitor()
         onReady()
+    }
+
+    /**
+     * Blocks the calling thread until [close] is invoked.
+     *
+     * [start] returns after the component is ready so GUI applications and
+     * components with their own run loop can continue initialization. A
+     * headless component whose main thread would otherwise return can call
+     * this method explicitly after installing its shutdown hook.
+     */
+    fun awaitTermination() {
         closeLatch.await()
     }
 
@@ -101,6 +112,9 @@ abstract class Component(
                         logger.info("reconnected successfully")
                     } catch (e: Exception) {
                         reconnectAttempts++
+                        if (!_closed) {
+                            state = ConnectionState.DISCONNECTED
+                        }
                         logger.warning("reconnect attempt ${reconnectAttempts} failed: ${e.message}")
                     }
                 }
