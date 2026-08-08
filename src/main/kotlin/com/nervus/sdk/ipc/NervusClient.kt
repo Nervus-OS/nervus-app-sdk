@@ -17,6 +17,32 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.logging.Logger
 
+/**
+ * 把四个选择条件拼成一个 [ResourceSelector]，四个都空时返回 null（不带 selector）。
+ *
+ * 【labels 和 policy 也要算进「有没有 selector」】。只看 type/role 的话，一个
+ * 纯按标签选设备的调用会把 selector 整个丢掉，然后在内核那边表现为「你没给
+ * selector」——错在客户端，报在服务端，而且报出来的信息完全指不到真正的原因。
+ */
+internal fun buildResourceSelector(
+    resourceType: String,
+    resourceRole: String,
+    resourceLabels: Map<String, String>,
+    selectionPolicy: ResourceSelectionPolicy
+): ResourceSelector? {
+    val empty = resourceType.isEmpty() &&
+        resourceRole.isEmpty() &&
+        resourceLabels.isEmpty() &&
+        selectionPolicy == ResourceSelectionPolicy.RESOURCE_SELECTION_POLICY_UNSPECIFIED
+    if (empty) return null
+    return ResourceSelector.newBuilder()
+        .setType(resourceType)
+        .setRole(resourceRole)
+        .putAllLabels(resourceLabels)
+        .setPolicy(selectionPolicy)
+        .build()
+}
+
 enum class ConnectionState {
     DISCONNECTED,
     CONNECTING,
@@ -26,10 +52,7 @@ enum class ConnectionState {
 
 internal open class NervusClient(
     val sdkName: String = "nervus-app-sdk",
-    val sdkVersion: String = "0.1.0",
-    val minProtocolMajor: Int = 1,
-    val maxProtocolMajor: Int = 1,
-    val maxProtocolMinor: Int = 0
+    val sdkVersion: String = "0.1.0"
 ) : AutoCloseable {
     @Volatile
     private var udSocket: UnixDomainSocket? = null
@@ -92,9 +115,9 @@ internal open class NervusClient(
 
             val handshake = HelloHandshake(reader, writer)
             val result = handshake.negotiate(
-                minMajor = minProtocolMajor,
-                maxMajor = maxProtocolMajor,
-                maxMinor = maxProtocolMinor,
+                minMajor = PROTOCOL_MAJOR_MIN,
+                maxMajor = PROTOCOL_MAJOR_MAX,
+                maxMinor = PROTOCOL_MINOR_MAX,
                 sdkName = sdkName,
                 sdkVersion = sdkVersion,
                 componentId = componentId,
@@ -541,12 +564,28 @@ internal open class NervusClient(
         }
     }
 
+    /**
+     * 解析一个接口，拿到可以下发调用的 endpoint_id。
+     *
+     * 【绑资源的接口必须自己给出 selector】。v1 里留空会由 nervud 隐式取
+     * `{nervus.resource.motion.base, main}`，v2 删掉了那条默认——它让「我忘了填」
+     * 和「我要底盘」变成同一件事。现在留空会被内核拒，而不是静默拿到底盘。
+     *
+     * 选设备优先用 [resourceLabels]（如 `nervus.camera.facing=front`）而不是
+     * [resourceRole]：role 是某台机器上的稳定编号，换一块板子就未必还叫这个名字。
+     *
+     * [selectionPolicy] 不指定 = REQUIRE_UNIQUE：命中多个就报错，而不是替你挑
+     * 一个。想让系统挑用 SYSTEM_PREFERRED。
+     */
     fun resolveEndpoint(
         interfaceId: String,
         minInterfaceMajor: Int = 1,
         maxInterfaceMajor: Int = 1,
         resourceType: String = "",
         resourceRole: String = "",
+        resourceLabels: Map<String, String> = emptyMap(),
+        selectionPolicy: ResourceSelectionPolicy =
+            ResourceSelectionPolicy.RESOURCE_SELECTION_POLICY_UNSPECIFIED,
         explicitComponent: String = "",
         timeoutMs: Int = handshakeResult?.limits?.defaultTimeoutMs ?: 5000
     ): CompletableFuture<Response> {
@@ -562,12 +601,8 @@ internal open class NervusClient(
                 .setMinInterfaceMajor(minInterfaceMajor)
                 .setMaxInterfaceMajor(maxInterfaceMajor)
 
-            if (resourceType.isNotEmpty() || resourceRole.isNotEmpty()) {
-                builder.selector = ResourceSelector.newBuilder()
-                    .setType(resourceType)
-                    .setRole(resourceRole)
-                    .build()
-            }
+            buildResourceSelector(resourceType, resourceRole, resourceLabels, selectionPolicy)
+                ?.let { builder.selector = it }
             if (explicitComponent.isNotEmpty()) {
                 builder.explicitComponent = explicitComponent
             }
@@ -644,10 +679,22 @@ internal open class NervusClient(
         }
     }
 
+    /**
+     * 订阅一个事件。
+     *
+     * [scope] 是【实例作用域】：一个 endpoint 上可以同时跑着多个能独立观察的
+     * 实例（一路摄像头上的几条 stream、一个内建 endpoint 上全机的 operation）。
+     * 事件声明了 `EventMeta.scoped` 时本参数必填且非 0，否则必须留 0——两个
+     * 方向 nervud 都会拒，不会静默放过。
+     *
+     * 填什么值由 Provider 定，通常就是它返回给你的那个句柄（stream_id、
+     * operation_id）。订一个不归自己的实例返回 NOT_FOUND。
+     */
     fun subscribe(
         endpointId: Long,
         eventId: Int,
         payload: ByteArray = ByteArray(0),
+        scope: Long = 0,
         timeoutMs: Int = handshakeResult?.limits?.defaultTimeoutMs ?: 5000
     ): CompletableFuture<Flow<Event>> {
         val limits = handshakeResult?.limits
@@ -666,6 +713,7 @@ internal open class NervusClient(
                 .setEndpointId(endpointId)
                 .setEventId(eventId)
                 .setPayload(com.google.protobuf.ByteString.copyFrom(payload))
+                .setScope(scope)
                 .build()
 
             writer.writeFrame(

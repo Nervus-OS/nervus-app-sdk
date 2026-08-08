@@ -78,6 +78,15 @@ tasks.named("clean") {
     dependsOn(cleanProtocol)
 }
 
+// 【javac 必须显式指定 UTF-8】。不指定它就用平台默认编码，在中文 Windows 上
+// 是 GBK——而 nervus-ipc 生成的 Java 里全是 UTF-8 中文注释，于是每次构建刷出
+// 几百行 "unmappable character for encoding GBK"，注释在 class 文件里变成乱码。
+// 更要命的是这行为【跟着开发机的 locale 走】：同一份代码在 CI 上干净，在某个
+// 人的机器上刷屏，甚至可能因为某个字符恰好落在 GBK 的非法序列上而直接编译失败。
+tasks.withType<JavaCompile>().configureEach {
+    options.encoding = "UTF-8"
+}
+
 dependencies {
     implementation(libs.protobuf.java)
     implementation(libs.protobuf.kotlin)

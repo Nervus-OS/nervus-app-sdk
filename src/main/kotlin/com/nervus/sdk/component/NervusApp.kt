@@ -13,6 +13,7 @@ import io.github.nervusos.ipc.v1.DispatchResult
 import io.github.nervusos.ipc.v1.Event
 import io.github.nervusos.ipc.v1.Failure
 import io.github.nervusos.ipc.v1.ResolveEndpointSuccess
+import io.github.nervusos.ipc.v1.ResourceSelectionPolicy
 import io.github.nervusos.ipc.v1.StatusCode
 import kotlinx.coroutines.flow.Flow
 import java.util.concurrent.CompletableFuture
@@ -20,12 +21,30 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.reflect.KClass
 
+/**
+ * 一条「我要用某个接口」的声明。
+ *
+ * 绑资源的接口必须自己给出选择条件——[resourceType] 加上 [labels] 或
+ * [resourceRole]。留空不会得到一个默认设备，会被内核拒（见
+ * `NervusClient.resolveEndpoint`）。
+ */
 data class InterfaceRequirement(
     val id: String,
     val minMajor: Int = 1,
     val maxMajor: Int = 1,
     val resourceType: String = "",
+    /**
+     * 稳定角色，如 "main" / "front"。
+     *
+     * 【优先用 [labels]】。role 是某台机器上的编号，换一块板子就未必还叫这个
+     * 名字；按语义选（`nervus.camera.facing=front`）的代码换板子不用改。
+     */
     val resourceRole: String = "",
+    /** 标签过滤，全部命中才算数（AND）。平台标签用 `nervus.*`，OEM 私有的用自己的包名。 */
+    val labels: Map<String, String> = emptyMap(),
+    /** 命中多个时怎么办。默认 REQUIRE_UNIQUE：报错，而不是替你挑一个。 */
+    val selectionPolicy: ResourceSelectionPolicy =
+        ResourceSelectionPolicy.RESOURCE_SELECTION_POLICY_UNSPECIFIED,
     val isRequired: Boolean = true,
 )
 
@@ -184,14 +203,23 @@ abstract class NervusApp(
         proxyCache.clear()
     }
 
+    /**
+     * 订阅某个接口上的事件。
+     *
+     * [scope] 是实例作用域：一个 endpoint 上同时开着多条流 / 多个 operation 时，
+     * 指定要看哪一个，值就是 Provider 返回给你的那个句柄。事件声明了 scoped 就
+     * 必填且非 0，没声明就必须留 0——填错哪一边内核都会拒。订一个不归自己的
+     * 实例返回 NOT_FOUND。
+     */
     protected fun subscribe(
         interfaceClass: KClass<*>,
         eventId: Int,
-        payload: ByteArray = ByteArray(0)
+        payload: ByteArray = ByteArray(0),
+        scope: Long = 0
     ): CompletableFuture<Flow<Event>> {
         val c = client ?: throw IllegalStateException("component not started")
         val endpoint = findEndpointForInterface(interfaceClass)
-        return c.subscribe(endpoint.endpointId, eventId, payload)
+        return c.subscribe(endpoint.endpointId, eventId, payload, scope)
     }
 
     private fun resolveRequiredInterfaces(c: NervusClient) {
@@ -215,6 +243,8 @@ abstract class NervusApp(
                 maxInterfaceMajor = req.maxMajor,
                 resourceType = req.resourceType,
                 resourceRole = req.resourceRole,
+                resourceLabels = req.labels,
+                selectionPolicy = req.selectionPolicy,
             ).get(30, TimeUnit.SECONDS)
         } catch (e: Exception) {
             throw RuntimeException("resolve request failed: ${e.message}", e)
