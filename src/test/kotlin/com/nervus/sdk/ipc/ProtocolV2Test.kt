@@ -242,3 +242,87 @@ class ProtocolV2Test {
             Side(FrameReader(bIn), FrameWriter(bOut))
     }
 }
+
+/**
+ * Failure 的细因渲染。
+ *
+ * nervud 不填 public_message，细因在 error_detail 里。少了解码，应用作者看到的
+ * 就是一句光秃秃的 `(code=STATUS_CODE_FAILED_PRECONDITION)`——而这个码在 Resolve
+ * 路径上对应四种完全不同的处置。
+ */
+class FailureTextTest {
+
+    private fun failureWith(reason: ResolveEndpointReason): Failure =
+        Failure.newBuilder()
+            .setCode(StatusCode.STATUS_CODE_FAILED_PRECONDITION)
+            .setErrorDetail(
+                ResolveEndpointErrorDetail.newBuilder().setReason(reason).build().toByteString()
+            )
+            .build()
+
+    /** 【核心】：细因必须出现在消息里，光有 code 等于让人四条路各试一遍。 */
+    @Test
+    fun `reason is surfaced, not just the code`() {
+        val text = describeFailure(
+            failureWith(ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_INTERFACE_NOT_FOUND)
+        )
+        assertContains(text, "INTERFACE_NOT_FOUND")
+        assertContains(text, "STATUS_CODE_FAILED_PRECONDITION")
+    }
+
+    @Test
+    fun `each resolve reason carries an actionable hint`() {
+        val reasons = listOf(
+            ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_INTERFACE_NOT_FOUND,
+            ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_VERSION_MISMATCH,
+            ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_RESOURCE_NOT_FOUND,
+            ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_RESOURCE_AMBIGUOUS,
+        )
+        for (r in reasons) {
+            val text = describeFailure(failureWith(r))
+            assertTrue(text.contains("（"), "reason $r 没有给出该怎么办：$text")
+        }
+    }
+
+    /** 没有 detail 时不崩，退化成 code。 */
+    @Test
+    fun `bare failure degrades to the code`() {
+        val text = describeFailure(
+            Failure.newBuilder().setCode(StatusCode.STATUS_CODE_NOT_FOUND).build()
+        )
+        assertEquals("code=STATUS_CODE_NOT_FOUND", text)
+    }
+
+    /**
+     * 【解不开的 detail 不能抛】。新版内核换了 detail 类型时，客户端该退化成
+     * 报 code，而不是把一次可用的错误报告变成一次解析异常——那会掩盖真正的错误。
+     */
+    @Test
+    fun `undecodable detail degrades instead of throwing`() {
+        val text = describeFailure(
+            Failure.newBuilder()
+                .setCode(StatusCode.STATUS_CODE_INTERNAL)
+                .setErrorDetail(com.google.protobuf.ByteString.copyFrom(byteArrayOf(-1, -1, -1, -1)))
+                .build()
+        )
+        assertContains(text, "STATUS_CODE_INTERNAL")
+    }
+
+    /** public_message 非空时一并带上，不互相覆盖。 */
+    @Test
+    fun `public message is kept alongside the reason`() {
+        val text = describeFailure(
+            Failure.newBuilder()
+                .setCode(StatusCode.STATUS_CODE_FAILED_PRECONDITION)
+                .setPublicMessage("provider not ready")
+                .setErrorDetail(
+                    ResolveEndpointErrorDetail.newBuilder()
+                        .setReason(ResolveEndpointReason.RESOLVE_ENDPOINT_REASON_INTERFACE_NOT_FOUND)
+                        .build().toByteString()
+                )
+                .build()
+        )
+        assertContains(text, "provider not ready")
+        assertContains(text, "INTERFACE_NOT_FOUND")
+    }
+}

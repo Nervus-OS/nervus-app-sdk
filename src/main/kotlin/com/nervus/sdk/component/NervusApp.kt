@@ -5,6 +5,7 @@ import com.nervus.sdk.annotations.Interface
 import com.nervus.sdk.annotations.Method
 import com.nervus.sdk.ipc.ConnectionState
 import com.nervus.sdk.ipc.NervusClient
+import com.nervus.sdk.ipc.describeFailure
 import com.nervus.sdk.runtime.InterfaceProxy
 import com.nervus.sdk.runtime.ResolvedEndpoint
 import com.nervus.sdk.runtime.ServiceStub
@@ -189,7 +190,7 @@ abstract class NervusApp(
             maxInterfaceMajor = maxMajor,
         ).get(timeoutSeconds, TimeUnit.SECONDS)
         if (response.hasFailure()) {
-            throw RuntimeException("resolve '$interfaceId' failed: ${response.failure.publicMessage}")
+            throw RuntimeException("resolve '$interfaceId' failed: ${describeFailure(response.failure)}")
         }
         return ResolveEndpointSuccess.parseFrom(response.success.payload).endpointId
     }
@@ -250,9 +251,7 @@ abstract class NervusApp(
             throw RuntimeException("resolve request failed: ${e.message}", e)
         }
         if (response.hasFailure()) {
-            throw RuntimeException(
-                "${response.failure.publicMessage} (code=${response.failure.code})"
-            )
+            throw RuntimeException(describeFailure(response.failure))
         }
         val success = ResolveEndpointSuccess.parseFrom(response.success.payload)
         return ResolvedEndpoint(
